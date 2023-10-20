@@ -12,20 +12,26 @@ using Actions = OpenQA.Selenium.Interactions.Actions;
 using Exception = System.Exception;
 using NLog;
 using System.Web;
+using NPOI.OpenXmlFormats.Spreadsheet;
+using System.Collections.ObjectModel;
+using System.Runtime.InteropServices.WindowsRuntime;
 
 namespace Ghosts.Client.Handlers
 {
 
+   
     /// <summary>
     /// Supports upload, download, deletion of documents
     /// download, deletion only done from the first page
+    /// Tested with Sharepoint 2013 and 2019
+    /// 2019 uses the 'classic view' for 2013 compatibility
     /// </summary>
-    public class SharepointHelper2013 : SharepointHelper
+    public class SharepointHelper2013_2019 : SharepointHelper
     {
 
-        public SharepointHelper2013(BaseBrowserHandler callingHandler, IWebDriver callingDriver)
+        public SharepointHelper2013_2019(BaseBrowserHandler callingHandler, IWebDriver callingDriver, string aversion)
         {
-            base.Init(callingHandler, callingDriver);
+            base.Init(callingHandler, callingDriver, aversion);
 
         }
 
@@ -37,7 +43,7 @@ namespace Ghosts.Client.Handlers
             string portal = site;
 
             var pw_encoded = HttpUtility.UrlEncode(pw);
-            var user_encoded = HttpUtility.UrlEncode(user); 
+            var user_encoded = HttpUtility.UrlEncode(user);
             string target = header + user_encoded + ":" + pw_encoded + "@" + portal + "/";
             config = RequestConfiguration.Load(handler, target);
             try
@@ -56,9 +62,27 @@ namespace Ghosts.Client.Handlers
                 return false;
 
             }
-            target = header + portal + "/Documents/Forms/Allitems.aspx";
+            if (version == "2013")  target = header + portal + "/Documents/Forms/Allitems.aspx";
+            else target = header + portal + "/Shared Documents/Forms/Allitems.aspx";
             config = RequestConfiguration.Load(handler, target);
             baseHandler.MakeRequest(config);
+
+            // check if there is a 'Return to classic Sharepoint link
+            if (version != "2013")
+            {
+                try
+                {
+
+                    var targetElement = Driver.FindElement(By.CssSelector("[aria-label=\"Click or enter to return to classic SharePoint\""));
+
+                    targetElement.Click();
+                }
+                catch (ThreadAbortException)
+                {
+                    throw;  //pass up
+                }
+            }
+
             //click on the files tab
             try
             {
@@ -81,36 +105,34 @@ namespace Ghosts.Client.Handlers
             return true;
         }
 
+       
         public override bool DoDownload(TimelineHandler handler)
         {
 
             Actions actions;
-            
+
 
             try
             {
-                var targetElements = Driver.FindElements(By.CssSelector("td[class='ms-cellStyleNonEditable ms-vb-itmcbx ms-vb-imgFirstCell']"));
-                if (targetElements.Count > 0)
+                //this only gets non-folder elements
+                var targetElements = Driver.FindElements(By.XPath("//img[@draggable='true']"));
+                if (targetElements != null && targetElements.Count > 0)
                 {
-
-
                     int docNum = _random.Next(0, targetElements.Count);
                     var targetElement = targetElements[docNum];
-                    MoveToElementAndClick(targetElement);
-                    var checkboxElement = targetElement.FindElement(By.XPath(".//div[@role='checkbox']"));
-                    string fname = checkboxElement.GetAttribute("title");
-
-                    Thread.Sleep(1000);
+                    string fname = targetElement.GetAttribute("title");
+                    //now find the chkbox element corresponding to this
+                    //get the element, then parent, then preceding sibling
+                    var checkBoxElement = Driver.FindElement(By.XPath($"//img[contains(@title,'{fname}')]//parent::td//preceding-sibling::td[contains(@class,'ms-vb-imgFirstCell')]"));
+                    MoveToElementAndClick(checkBoxElement);
+                    Thread.Sleep(5000);
                     //download it
                     targetElement = Driver.FindElement(By.Id("Ribbon.Documents.Copies.Download-Large"));
                     actions = new Actions(Driver);
                     actions.MoveToElement(targetElement).Click().Perform();
-
-                    Thread.Sleep(1000);
+                    Thread.Sleep(5000);
                     //have to click on document element again to deselect it in order to enable next download
-                    //targetElements[docNum].Click();  //select the doc
-                    targetElement = targetElements[docNum];
-                    MoveToElementAndClick(targetElement);
+                    MoveToElementAndClick(checkBoxElement);
                     Log.Trace($"Sharepoint:: Downloaded file {fname} from site {site}.");
                     Thread.Sleep(1000);
                 }
@@ -172,13 +194,40 @@ namespace Ghosts.Client.Handlers
                 var targetElement = Driver.FindElement(By.Id("Ribbon.Documents.New.AddDocument-Large"));
                 actions = new Actions(Driver);
                 actions.MoveToElement(targetElement).Click().Perform();
-                Thread.Sleep(1000);
-                Driver.SwitchTo().Frame(Driver.FindElement(By.ClassName("ms-dlgFrame")));
-                WebDriverWait wait = new WebDriverWait(Driver, span);
-                var uploadElement = Driver.FindElement(By.Id("ctl00_PlaceHolderMain_UploadDocumentSection_ctl05_InputFile"));
-                uploadElement.SendKeys(fname);
-                Thread.Sleep(500);
-                var okElement = Driver.FindElement(By.Id("ctl00_PlaceHolderMain_ctl03_RptControls_btnOK"));
+                IWebElement uploadElement;
+                var i = 0;
+                // do these contortions as sometimes in 2019 this will fail because there is an
+                // an intermediate popup called 'WORKING' that can confuse Selenium.
+                // When this happens, the upload will not succeed but we will not get hung up on the upload pane
+                while (true)
+                {
+                    try
+                    {
+                        Thread.Sleep(5000);
+                        Driver.SwitchTo().Frame(Driver.FindElement(By.ClassName("ms-dlgFrame")));
+                        uploadElement = Driver.FindElement(By.XPath("//input[contains(@class,'ms-fileinput')]"));
+                        uploadElement.SendKeys(fname);
+                        Thread.Sleep(500);
+                        break;
+                    }
+                    catch (ThreadAbortException)
+                    {
+                        throw;  //pass up
+                    }
+                    catch (Exception e)
+                    {
+                        i += 1;
+                        if (i >= 5) break;
+                    }
+                }
+                IWebElement okElement;
+                if (version == "2013")
+                {
+                    okElement = Driver.FindElement(By.Id("ctl00_PlaceHolderMain_ctl03_RptControls_btnOK"));
+                }
+                else { 
+                    okElement = Driver.FindElement(By.XPath("//*[@value='OK']"));
+                }
                 actions = new Actions(Driver);
                 actions.MoveToElement(okElement).Click().Perform();
                 Thread.Sleep(500);
@@ -212,24 +261,26 @@ namespace Ghosts.Client.Handlers
             //select a file to delete
             try
             {
-                var targetElements = Driver.FindElements(By.CssSelector("td[class='ms-cellStyleNonEditable ms-vb-itmcbx ms-vb-imgFirstCell']"));
+                var targetElements = Driver.FindElements(By.XPath("//img[@draggable='true']"));
                 if (targetElements.Count > 0)
                 {
                     int docNum = _random.Next(0, targetElements.Count);
                     var targetElement = targetElements[docNum];
-                    MoveToElementAndClick(targetElement);
+                    string fname = targetElement.GetAttribute("title");
+                    //now find the chkbox element corresponding to this
+                    //get the element, then parent, then preceding sibling
+                    var checkBoxElement = Driver.FindElement(By.XPath($"//img[contains(@title,'{fname}')]//parent::td//preceding-sibling::td[contains(@class,'ms-vb-imgFirstCell')]"));
+                    MoveToElementAndClick(checkBoxElement);
                    
-                    var checkboxElement = targetElements[docNum].FindElement(By.XPath(".//div[@role='checkbox']"));
-                    string fname = checkboxElement.GetAttribute("title");
 
-                    Thread.Sleep(1000);
+                    Thread.Sleep(5000);
                     //delete it
                     //somewhat weird, had to locate this element by the tooltip
                     targetElement = Driver.FindElement(By.CssSelector("a[aria-describedby='Ribbon.Documents.Manage.Delete_ToolTip'"));
                     actions = new Actions(Driver);
                     //deal with the popup
                     actions.MoveToElement(targetElement).Click().Perform();
-                    Thread.Sleep(1000);
+                    Thread.Sleep(5000);
                     Driver.SwitchTo().Alert().Accept();
                     Log.Trace($"Sharepoint:: Deleted file {fname} from site {site}.");
                     Thread.Sleep(1000);
@@ -245,7 +296,7 @@ namespace Ghosts.Client.Handlers
             }
             catch (Exception e)
             {
-                Log.Trace($"Sharepoint:: Error performing sharepoint download from site {site}.");
+                Log.Trace($"Sharepoint:: Error performing sharepoint delete from site {site}.");
                 Log.Error(e);
                 errorCount += 1;
             }
@@ -275,7 +326,7 @@ namespace Ghosts.Client.Handlers
         string password { get; set; } = null;
         public string header { get; set; } = null;
 
-        string _version = null;
+        public string version { get; set; } = null;
         public string uploadDirectory { get; set; } = null;
 
         
@@ -287,7 +338,8 @@ namespace Ghosts.Client.Handlers
             {
                 var version = handler.HandlerArgs["sharepoint-version"].ToString();
                 //this needs to be extended in the future
-                if (version == "2013") helper = new SharepointHelper2013(callingHandler, callingDriver);
+                if (version == "2013" || version == "2019") helper = new SharepointHelper2013_2019(callingHandler, callingDriver, version);
+               
 
                 if (helper == null)
                 {
@@ -308,10 +360,11 @@ namespace Ghosts.Client.Handlers
         }
         
 
-        public void Init(BaseBrowserHandler callingHandler, IWebDriver currentDriver)
+        public void Init(BaseBrowserHandler callingHandler, IWebDriver currentDriver, string aversion)
         {
             baseHandler = callingHandler;
             Driver = currentDriver;
+            version = aversion;
         }
 
         private bool CheckProbabilityVar(string name, int value)
@@ -344,25 +397,25 @@ namespace Ghosts.Client.Handlers
 
         public virtual bool DoInitialLogin(TimelineHandler handler, string user, string pw)
         {
-            Log.Trace($"Blog:: Unsupported action 'DoInitialLogin' in Blog version {_version} ");
+            Log.Trace($"Blog:: Unsupported action 'DoInitialLogin' in Blog version {version} ");
             return false;
         }
 
         public virtual bool DoDownload(TimelineHandler handler)
         {
-            Log.Trace($"Blog:: Unsupported action 'Browse' in Blog version {_version} ");
+            Log.Trace($"Blog:: Unsupported action 'Browse' in Blog version {version} ");
             return false;
         }
 
         public virtual bool DoDelete(TimelineHandler handler)
         {
-            Log.Trace($"Blog:: Unsupported action 'Delete' in Blog version {_version} ");
+            Log.Trace($"Blog:: Unsupported action 'Delete' in Blog version {version} ");
             return false;
         }
 
         public virtual bool DoUpload(TimelineHandler handler)
         {
-            Log.Trace($"Blog:: Unsupported action 'upload' in Blog version {_version} ");
+            Log.Trace($"Blog:: Unsupported action 'upload' in Blog version {version} ");
             return true;
         }
 
@@ -417,7 +470,7 @@ namespace Ghosts.Client.Handlers
 
                 case "initial":
                     //these are only parsed once, global for the handler as handler can only have one entry.
-                    _version = handler.HandlerArgs["sharepoint-version"].ToString();  //guaranteed to have this option, parsed in calling handler
+                    version = handler.HandlerArgs["sharepoint-version"].ToString();  //guaranteed to have this option, parsed in calling handler
 
 
                     if (handler.HandlerArgs.ContainsKey("sharepoint-upload-directory"))
@@ -626,44 +679,5 @@ namespace Ghosts.Client.Handlers
 
     }
 
-    public abstract class BrowserHelper
-    {
-        public static readonly Logger Log = LogManager.GetCurrentClassLogger();
-        internal static readonly Random _random = new Random();
-        public BaseBrowserHandler baseHandler = null;
-        public IWebDriver Driver = null;
-
-
-        /// <summary>
-        /// This is used when the element being moved to may be out of the viewport (ie, at the bottom of the page).
-        /// Chrome handles this OK, but Firefox throws an exception, have to manually
-        /// scroll to ensure the element is in view
-        /// </summary>
-        /// <param name="targetElement"></param>
-        public void MoveToElementAndClick(IWebElement targetElement)
-        {
-            BrowserHelperSupport.MoveToElementAndClick(Driver, targetElement);
-        }
-
-    }
-
-    public class BrowserHelperSupport
-    {
-        public static void MoveToElementAndClick(IWebDriver Driver, IWebElement targetElement)
-        {
-            Actions actions;
-
-            if (Driver is OpenQA.Selenium.Firefox.FirefoxDriver)
-            {
-                IJavaScriptExecutor je = (IJavaScriptExecutor)Driver;
-                //be safe and scroll to element
-                je.ExecuteScript("arguments[0].scrollIntoView()", targetElement);
-                Thread.Sleep(500);
-            }
-            actions = new Actions(Driver);
-            actions.MoveToElement(targetElement).Click().Perform();
-        }
-
-    }
 
     }

@@ -19,6 +19,7 @@ using NPOI.SS.Formula.Functions;
 using Microsoft.AspNetCore.Mvc.Filters;
 using NPOI.OpenXmlFormats.Dml;
 using System.Runtime.InteropServices;
+using ReportItem = Ghosts.Domain.Code.ReportItem;
 
 namespace Ghosts.Client.Handlers;
 
@@ -50,6 +51,7 @@ public class Outlookv2 : BaseHandler
     private int _attachmentProbability = 0;   //when creating, probability to add an attachment
     private int _saveattachmentProbability = 0;   //when reading, probability to save attachment to disk
     private int _initialOutlookDelay = 3 * 60 * 1000;
+    private int _attachmentsMaxSize = 10; //max total size of attachments in MB
 
     private string _inputDirectory = null;
     private string _outputDirectory = null;
@@ -247,7 +249,7 @@ public class Outlookv2 : BaseHandler
                             emailConfig = new EmailConfiguration(timelineEvent.CommandArgs);
                             if (SendEmailViaOutlook(emailConfig))
                             {
-                                Report(handler.HandlerType.ToString(), timelineEvent.Command, emailConfig.ToString());
+                                Report(new ReportItem { Handler = handler.HandlerType.ToString(), Command = timelineEvent.Command, Arg = emailConfig.ToString(), Trackable = timelineEvent.TrackableId });
                                 Log.Trace("Outlookv2:: Created email");
                                 _totalErrorCount = 0;  //zero on success
                             }
@@ -262,7 +264,7 @@ public class Outlookv2 : BaseHandler
                             emailConfig = new EmailConfiguration(timelineEvent.CommandArgs);
                             if (ReplyViaOutlook(emailConfig))
                             {
-                                Report(handler.HandlerType.ToString(), timelineEvent.Command, emailConfig.ToString());
+                                Report(new ReportItem { Handler = handler.HandlerType.ToString(), Command = timelineEvent.Command, Arg = emailConfig.ToString(), Trackable = timelineEvent.TrackableId });
                                 Log.Trace("Outlookv2:: Replied email");
                                 _totalErrorCount = 0;  //zero on success
                             }
@@ -472,6 +474,15 @@ public class Outlookv2 : BaseHandler
         if (_outputDirectory == null)
         {
             _outputDirectory = KnownFolders.GetDownloadFolderPath();
+        }
+
+        if (handler.HandlerArgs.ContainsKey("max-attachments-size"))
+        {
+            int.TryParse(handler.HandlerArgs["max-attachments-size"].ToString(), out _attachmentsMaxSize);
+            if (_attachmentsMaxSize <= 0)
+            {
+                _attachmentsMaxSize = 10;
+            }
         }
 
         if (handler.HandlerArgs.ContainsKey("min-attachments"))
@@ -1008,35 +1019,54 @@ public class Outlookv2 : BaseHandler
         return false;
     }
 
-    private List<string> GetRandomFiles(string targetDir, string pattern, int count)
+    private List<string> GetRandomFiles(string targetDir, string pattern, int count, int maxSize)
     {
         try
         {
             while (true)
             {
+                if (count == 0) return null;
+                //divide maxSize by count so that there is no possibility of total attachment size exceeding maxSize
+                long maxSizeBytes = (maxSize * 1024 * 1024) / count; //maxSize is in MB
                 string[] filelist = Directory.GetFiles(targetDir, pattern);
                 if (filelist.Length == 0) return null;
-                if (count == 0) return null;
-                List<string> retVal = new List<string>();
-                if (count == 1)
-                {
-                    retVal.Add(filelist[_random.Next(0,filelist.Length-1)]);
-                    return retVal;
-                }
-                // need more than one, have to avoid duplicates, prune down
+                //filter files by maxSizeBytes
+                List<string> filteredFiles = new List<string>();
                 foreach (string file in filelist)
                 {
-                    retVal.Add(file);
+                    try
+                    {
+                        FileInfo info = new FileInfo(file);
+                        if (info.Length <= maxSizeBytes)
+                        {
+                            filteredFiles.Add(file);
+                        }
+                  
+                    }
+                    catch (ThreadAbortException)
+                    {
+                        throw;  //pass up
+                    }
+                    catch (Exception e)
+                    {
+                        Log.Error($"Outlook file access error during attachments: {e}");
+                    }
                 }
+                if (filteredFiles.Count == 0) return null;         
                 
+                if (count == 1)
+                {
+                    return new List<string>() { filteredFiles[_random.Next(0, filteredFiles.Count - 1)] };
+                }
+                // need more than one, have to avoid duplicates, prune down
                 while (true)
                 {
-                    if (retVal.Count <= count) break;
-                    var index = _random.Next(0, retVal.Count - 1);
-                    retVal.RemoveAt(index);
+                    if (filteredFiles.Count <= count) break;
+                    var index = _random.Next(0, filteredFiles.Count - 1);
+                    filteredFiles.RemoveAt(index);
                 }
 
-                return retVal;
+                return filteredFiles;
             }
         }
         catch (ThreadAbortException)
@@ -1097,7 +1127,7 @@ public class Outlookv2 : BaseHandler
                     int numAttachments = _random.Next(_attachmentsMin, _attachmentsMax);
                     if (numAttachments > 0)
                     {
-                        attachments = GetRandomFiles(_inputDirectory, "*", numAttachments);
+                        attachments = GetRandomFiles(_inputDirectory, "*", numAttachments, _attachmentsMaxSize);
                     }
                 }
             }
